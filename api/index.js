@@ -37,7 +37,7 @@ const MANIFEST = {
   name: 'TioHentai Addon',
   version: '1.0.0',
   description: 'Addon de web scraping en tiempo real para reproducir contenido de TioHentai en Nuvio y Stremio.',
-  resources: ['catalog', 'stream'],
+  resources: ['catalog', 'meta', 'stream'],
   types: ['anime'],
   idPrefixes: ['tio-'],
   catalogs: [
@@ -255,6 +255,140 @@ async function scrapeCatalog(searchQuery) {
 }
 
 /**
+ * Función de Web Scraping para los Metadatos de un Anime/Hentai y su lista de episodios
+ */
+async function scrapeMeta(rawId) {
+  const cleanId = (rawId || '').replace(/\.json$/, '').trim();
+  const cleanSlug = cleanId
+    .replace(/^tio-/, '')
+    .replace(/^ver-/, '')
+    .replace(/^ver\//, '')
+    .replace(/^hentai-/, '')
+    .replace(/^hentai\//, '')
+    .trim();
+
+  const axiosHeaders = {
+    'User-Agent': USER_AGENT,
+    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+    Referer: `${BASE_URL}/`
+  };
+
+  let targetUrl = `${BASE_URL}/hentai/${cleanSlug}`;
+  let html = '';
+  let finalSlug = cleanSlug;
+
+  try {
+    const resp = await axios.get(targetUrl, {
+      headers: axiosHeaders,
+      timeout: 7000
+    });
+    html = resp.data;
+  } catch (err) {
+    if (err.response && err.response.status === 404) {
+      // Si el slug termina en número de episodio (ej. kanojo-no-tomodachi-3), probar con el slug de la serie
+      const seriesSlug = cleanSlug.replace(/-\d+$/, '');
+      if (seriesSlug !== cleanSlug) {
+        try {
+          const resp = await axios.get(`${BASE_URL}/hentai/${seriesSlug}`, {
+            headers: axiosHeaders,
+            timeout: 7000
+          });
+          html = resp.data;
+          finalSlug = seriesSlug;
+        } catch (e2) {}
+      }
+
+      // Si aún no hay HTML, intentar con la página de episodio /ver/
+      if (!html) {
+        try {
+          const resp = await axios.get(`${BASE_URL}/ver/${cleanSlug}`, {
+            headers: axiosHeaders,
+            timeout: 7000
+          });
+          html = resp.data;
+        } catch (e3) {}
+      }
+    } else {
+      throw err;
+    }
+  }
+
+  if (!html) {
+    return null;
+  }
+
+  const $ = cheerio.load(html);
+  const rawTitle =
+    $('h1.title').text().trim() ||
+    $('h1.anime-title').text().trim() ||
+    $('meta[property="og:title"]').attr('content') ||
+    finalSlug;
+
+  const title = rawTitle.replace(/\s*-\s*TioHentai.*$/i, '').trim();
+
+  let poster =
+    $('.thumb img').attr('src') ||
+    $('meta[property="og:image"]').attr('content') ||
+    '';
+
+  if (poster && !poster.startsWith('http://') && !poster.startsWith('https://')) {
+    poster = `${BASE_URL}${poster.startsWith('/') ? '' : '/'}${poster}`;
+  }
+
+  let description =
+    $('p.sinopsis').text().trim() ||
+    $('meta[property="og:description"]').attr('content') ||
+    '';
+
+  description = description.replace(/\s*-\s*TioHentai.*$/i, '').trim();
+  if (!description) {
+    description = `Ver ${title} en TioHentai con la mejor calidad en HD.`;
+  }
+
+  // Extraer géneros
+  const genres = [];
+  $('.genres a').each((_, el) => {
+    const g = $(el).text().trim();
+    if (g) genres.push(g);
+  });
+
+  // Extraer lista de episodios de var episodes = [...]
+  let episodes = [];
+  const epMatch = html.match(/var\s+episodes\s*=\s*(\[[\s\S]*?\]);/);
+  if (epMatch) {
+    try {
+      episodes = JSON.parse(epMatch[1]);
+    } catch (e) {}
+  }
+
+  if (!Array.isArray(episodes) || episodes.length === 0) {
+    episodes = [1];
+  }
+
+  // Ordenar episodios numéricamente en orden ascendente (1, 2, 3...)
+  episodes.sort((a, b) => Number(a) - Number(b));
+
+  const videos = episodes.map((epNum) => ({
+    id: `tio-${finalSlug}-${epNum}`,
+    title: `Episodio ${epNum}`,
+    season: 1,
+    episode: Number(epNum)
+  }));
+
+  return {
+    id: `tio-${finalSlug}`,
+    type: 'anime',
+    name: title,
+    poster,
+    background: poster,
+    description,
+    genres: genres.length > 0 ? genres : ['Hentai', 'Anime'],
+    videos
+  };
+}
+
+/**
  * Función principal de Web Scraping para un episodio o anime de TioHentai
  */
 async function scrapeEpisode(episodeSlugOrUrl) {
@@ -468,6 +602,12 @@ app.get('/', (req, res) => {
               </a>
             </li>
             <li class="mb-2">
+              <span class="text-white small">📄 Metadatos y Episodios:</span><br>
+              <a href="/meta/anime/tio-kanojo-no-tomodachi.json" target="_blank" style="color: #38bdf8; text-decoration: underline;">
+                /meta/anime/tio-kanojo-no-tomodachi.json
+              </a>
+            </li>
+            <li class="mb-2">
               <span class="text-white small">🎬 Streams de Episodio:</span><br>
               <a href="/stream/anime/tio-kanojo-no-tomodachi-3.json" target="_blank" style="color: #38bdf8; text-decoration: underline;">
                 /stream/anime/tio-kanojo-no-tomodachi-3.json
@@ -520,6 +660,26 @@ app.get('/catalog/:type/:id/:extra', catalogHandler);
 app.get('/catalog/:type/:id.json', catalogHandler);
 app.get('/catalog/:type/:id', catalogHandler);
 
+// Endpoint GET /meta/anime/:id.json (y fallback sin extensión .json)
+const metaHandler = async (req, res) => {
+  const rawId = req.params.id;
+
+  try {
+    const meta = await scrapeMeta(rawId);
+    if (!meta) {
+      return res.json({ meta: null });
+    }
+    res.setHeader('Cache-Control', 'max-age=1800, public');
+    return res.json({ meta });
+  } catch (error) {
+    console.error(`[Meta Error] Error al extraer metadatos para ID "${rawId}":`, error.message);
+    return res.json({ meta: null });
+  }
+};
+
+app.get('/meta/:type/:id.json', metaHandler);
+app.get('/meta/:type/:id', metaHandler);
+
 // Endpoint GET /stream/anime/:id.json (y fallback sin extensión .json)
 const streamHandler = async (req, res) => {
   const rawId = req.params.id;
@@ -556,6 +716,7 @@ if (!process.env.VERCEL) {
     console.log(`📡 Local: http://localhost:${PORT}`);
     console.log(`📄 Manifiesto: http://localhost:${PORT}/manifest.json`);
     console.log(`📁 Catálogo: http://localhost:${PORT}/catalog/anime/tio-latest.json`);
+    console.log(`📄 Metadatos: http://localhost:${PORT}/meta/anime/tio-kanojo-no-tomodachi.json`);
     console.log(`=======================================================`);
   });
 }
