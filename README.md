@@ -54,9 +54,17 @@ vercel dev
 
 2. **Manifiesto del Addon:**
    - [http://localhost:3000/manifest.json](http://localhost:3000/manifest.json)
-   - Debe responder con el JSON del manifiesto compatible con Nuvio/Stremio.
+   - Responde con recursos `["catalog", "stream"]` y el catálogo `tio-latest`.
 
-3. **Prueba de Extracción de Streams (Web Scraping en tiempo real):**
+3. **Catálogo de Últimos Agregados:**
+   - [http://localhost:3000/catalog/anime/tio-latest.json](http://localhost:3000/catalog/anime/tio-latest.json)
+   - Devuelve la lista de anime/episodios con portada, título y prefijo `tio-`.
+
+4. **Búsqueda en el Catálogo:**
+   - [http://localhost:3000/catalog/anime/tio-latest/search=kanojo.json](http://localhost:3000/catalog/anime/tio-latest/search=kanojo.json)
+   - Realiza búsqueda en tiempo real en TioHentai.
+
+5. **Prueba de Extracción de Streams (Web Scraping en tiempo real):**
    - [http://localhost:3000/stream/anime/tio-kanojo-no-tomodachi-3.json](http://localhost:3000/stream/anime/tio-kanojo-no-tomodachi-3.json)
    - Verás el arreglo `streams` con los servidores detectados (YourUpload con enlace directo MP4, VOE, MEGA, etc.) y sus correspondientes `proxyHeaders`.
 

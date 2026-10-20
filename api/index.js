@@ -37,10 +37,17 @@ const MANIFEST = {
   name: 'TioHentai Addon',
   version: '1.0.0',
   description: 'Addon de web scraping en tiempo real para reproducir contenido de TioHentai en Nuvio y Stremio.',
-  resources: ['stream'],
+  resources: ['catalog', 'stream'],
   types: ['anime'],
   idPrefixes: ['tio-'],
-  catalogs: [],
+  catalogs: [
+    {
+      type: 'anime',
+      id: 'tio-latest',
+      name: 'TioHentai - Últimos Agregados',
+      extra: [{ name: 'search', isRequired: false }]
+    }
+  ],
   logo: 'https://tiohentai.com/assets/img/logo-dark.png',
   background: 'https://tiohentai.com/assets/img/bg.jpg',
   behaviorHints: {
@@ -171,23 +178,14 @@ async function resolveServer(serverName, embedUrl) {
 }
 
 /**
- * Función principal de Web Scraping para un episodio de TioHentai
+ * Función de Web Scraping para el Catálogo y la Búsqueda
  */
-async function scrapeEpisode(episodeSlugOrUrl) {
-  let targetUrl = '';
+async function scrapeCatalog(searchQuery) {
+  let targetUrl = BASE_URL;
 
-  // Sanitizar y construir la URL del episodio
-  if (episodeSlugOrUrl.startsWith('http://') || episodeSlugOrUrl.startsWith('https://')) {
-    targetUrl = episodeSlugOrUrl;
-  } else {
-    // Limpiar posibles prefijos 'tio-', 'ver-' o 'ver/'
-    let cleanSlug = episodeSlugOrUrl
-      .replace(/^tio-/, '')
-      .replace(/^ver-/, '')
-      .replace(/^ver\//, '')
-      .trim();
-
-    targetUrl = `${BASE_URL}/ver/${cleanSlug}`;
+  // Si se solicita una búsqueda, consultamos el directorio con el parámetro q
+  if (searchQuery && typeof searchQuery === 'string' && searchQuery.trim() !== '') {
+    targetUrl = `${BASE_URL}/directorio?q=${encodeURIComponent(searchQuery.trim())}`;
   }
 
   const response = await axios.get(targetUrl, {
@@ -199,6 +197,134 @@ async function scrapeEpisode(episodeSlugOrUrl) {
     },
     timeout: 7000
   });
+
+  const html = response.data;
+  const $ = cheerio.load(html);
+  const metas = [];
+  const seenIds = new Set();
+
+  // Extraer anime y episodios desde los artículos disponibles
+  $('article.anime, article.episode, article').each((_, el) => {
+    const aTag = $(el).find('a').first();
+    const href = aTag.attr('href') || '';
+    if (!href) return;
+
+    // Extraer slug limpio (removiendo /ver/ o /hentai/ y barras iniciales/finales)
+    const slug = href
+      .replace(/^\/(ver|hentai)\//, '')
+      .replace(/^\//, '')
+      .replace(/\/$/, '')
+      .trim();
+
+    if (!slug || slug === 'directorio' || slug === 'inicio' || slug.includes('censura')) return;
+
+    // Obtener poster / miniatura con URL absoluta
+    let poster =
+      $(el).find('img').attr('src') ||
+      $(el).find('img').attr('data-src') ||
+      '';
+
+    if (!poster || poster.includes('logo') || poster.includes('bg.jpg')) return;
+
+    if (poster && !poster.startsWith('http://') && !poster.startsWith('https://')) {
+      poster = `${BASE_URL}${poster.startsWith('/') ? '' : '/'}${poster}`;
+    }
+
+    const id = `tio-${slug}`;
+    if (seenIds.has(id)) return;
+    seenIds.add(id);
+
+    // Obtener título
+    const name =
+      $(el).find('.title').text().trim() ||
+      $(el).find('h3').text().trim() ||
+      $(el).find('h2').text().trim() ||
+      $(el).find('img').attr('alt') ||
+      slug;
+
+    metas.push({
+      id,
+      type: 'anime',
+      name,
+      poster,
+      description: `Ver ${name} en TioHentai`
+    });
+  });
+
+  return metas;
+}
+
+/**
+ * Función principal de Web Scraping para un episodio o anime de TioHentai
+ */
+async function scrapeEpisode(episodeSlugOrUrl) {
+  let cleanSlug = '';
+
+  // Sanitizar el slug del episodio
+  if (episodeSlugOrUrl.startsWith('http://') || episodeSlugOrUrl.startsWith('https://')) {
+    cleanSlug = episodeSlugOrUrl
+      .replace(/^https?:\/\/[^\/]+\/(ver|hentai)\//, '')
+      .replace(/^\//, '')
+      .trim();
+  } else {
+    cleanSlug = episodeSlugOrUrl
+      .replace(/^tio-/, '')
+      .replace(/^ver-/, '')
+      .replace(/^ver\//, '')
+      .replace(/^hentai-/, '')
+      .replace(/^hentai\//, '')
+      .trim();
+  }
+
+  const axiosHeaders = {
+    'User-Agent': USER_AGENT,
+    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+    Referer: `${BASE_URL}/`
+  };
+
+  let targetUrl = `${BASE_URL}/ver/${cleanSlug}`;
+  let response;
+
+  try {
+    response = await axios.get(targetUrl, {
+      headers: axiosHeaders,
+      timeout: 7000
+    });
+  } catch (err) {
+    // Si no existe como episodio directo (/ver/slug), verificar si es una serie (/hentai/slug)
+    if (err.response && err.response.status === 404) {
+      try {
+        const seriesUrl = `${BASE_URL}/hentai/${cleanSlug}`;
+        const seriesResp = await axios.get(seriesUrl, {
+          headers: axiosHeaders,
+          timeout: 7000
+        });
+
+        const seriesHtml = seriesResp.data;
+        // Buscar episodios en `var episodes = [...]`
+        const epMatch = seriesHtml.match(/var\s+episodes\s*=\s*(\[[\s\S]*?\]);/);
+        let epNum = '1';
+        if (epMatch) {
+          const eps = JSON.parse(epMatch[1]);
+          if (Array.isArray(eps) && eps.length > 0) {
+            // Seleccionar el primer episodio de la lista
+            epNum = eps.sort((a, b) => a - b)[0];
+          }
+        }
+
+        targetUrl = `${BASE_URL}/ver/${cleanSlug}-${epNum}`;
+        response = await axios.get(targetUrl, {
+          headers: axiosHeaders,
+          timeout: 7000
+        });
+      } catch (seriesErr) {
+        throw err;
+      }
+    } else {
+      throw err;
+    }
+  }
 
   const html = response.data;
   const $ = cheerio.load(html);
@@ -303,7 +429,7 @@ app.get('/', (req, res) => {
       <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
       <style>
         body { background: #0f172a; color: #f8fafc; font-family: system-ui, -apple-system, sans-serif; }
-        .hero { max-width: 640px; margin: 60px auto; padding: 32px; background: #1e293b; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+        .hero { max-width: 680px; margin: 50px auto; padding: 32px; background: #1e293b; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
         .badge-status { background: #10b981; color: #fff; font-size: 0.85rem; padding: 4px 10px; border-radius: 9999px; }
         .code-box { background: #090d16; padding: 12px; border-radius: 8px; font-family: monospace; word-break: break-all; color: #38bdf8; }
         .btn-install { background: #6366f1; color: white; border: none; padding: 12px 24px; font-weight: 600; border-radius: 8px; text-decoration: none; display: inline-block; }
@@ -313,7 +439,7 @@ app.get('/', (req, res) => {
     <body>
       <div class="hero text-center">
         <h1 class="h3 mb-2 font-weight-bold">TioHentai Addon</h1>
-        <p class="text-secondary mb-3">Addon Serverless para Nuvio y Stremio con Web Scraping en Tiempo Real</p>
+        <p class="text-secondary mb-3">Addon Serverless con Catálogo, Búsqueda y Streams en Tiempo Real</p>
         <span class="badge-status mb-4 d-inline-block">● Estado: Activo en Vercel</span>
 
         <div class="my-4">
@@ -322,17 +448,32 @@ app.get('/', (req, res) => {
         </div>
 
         <div class="text-start mt-4">
-          <label class="form-label text-secondary small">URL del Manifiesto para Nuvio:</label>
+          <label class="form-label text-secondary small">URL del Manifiesto para Nuvio / Stremio:</label>
           <div class="code-box">${manifestUrl}</div>
         </div>
 
         <div class="text-start mt-4">
-          <label class="form-label text-secondary small">Ejemplo de consulta de Streams:</label>
-          <div class="code-box">
-            <a href="/stream/anime/tio-kanojo-no-tomodachi-3.json" target="_blank" style="color: #38bdf8; text-decoration: underline;">
-              /stream/anime/tio-kanojo-no-tomodachi-3.json
-            </a>
-          </div>
+          <label class="form-label text-secondary small">Pruebas Rápidas de Endpoints:</label>
+          <ul class="list-unstyled mt-2">
+            <li class="mb-2">
+              <span class="text-white small">📁 Catálogo Últimos Agregados:</span><br>
+              <a href="/catalog/anime/tio-latest.json" target="_blank" style="color: #38bdf8; text-decoration: underline;">
+                /catalog/anime/tio-latest.json
+              </a>
+            </li>
+            <li class="mb-2">
+              <span class="text-white small">🔍 Búsqueda en Catálogo:</span><br>
+              <a href="/catalog/anime/tio-latest/search=kanojo.json" target="_blank" style="color: #38bdf8; text-decoration: underline;">
+                /catalog/anime/tio-latest/search=kanojo.json
+              </a>
+            </li>
+            <li class="mb-2">
+              <span class="text-white small">🎬 Streams de Episodio:</span><br>
+              <a href="/stream/anime/tio-kanojo-no-tomodachi-3.json" target="_blank" style="color: #38bdf8; text-decoration: underline;">
+                /stream/anime/tio-kanojo-no-tomodachi-3.json
+              </a>
+            </li>
+          </ul>
         </div>
       </div>
     </body>
@@ -345,6 +486,39 @@ app.get('/manifest.json', (req, res) => {
   res.setHeader('Cache-Control', 'max-age=86400, public');
   res.json(MANIFEST);
 });
+
+// Endpoint GET /catalog/:type/:id.json y búsquedas
+const catalogHandler = async (req, res) => {
+  let searchQuery = req.params.query || req.query.search || null;
+
+  // Si viene en el parámetro comodín extra (ej: /catalog/anime/tio-latest/search=query.json)
+  if (!searchQuery && req.params.extra) {
+    const extraMatch = req.params.extra.match(/search[=:](.+)/i);
+    if (extraMatch) {
+      searchQuery = extraMatch[1];
+    }
+  }
+
+  if (searchQuery) {
+    searchQuery = decodeURIComponent(searchQuery).replace(/\.json$/, '').trim();
+  }
+
+  try {
+    const metas = await scrapeCatalog(searchQuery);
+    res.setHeader('Cache-Control', 'max-age=600, public');
+    return res.json({ metas: metas || [] });
+  } catch (error) {
+    console.error(`[Catalog Error] Error al consultar catálogo (query: "${searchQuery}"):`, error.message);
+    return res.json({ metas: [] });
+  }
+};
+
+app.get('/catalog/:type/:id/search=:query.json', catalogHandler);
+app.get('/catalog/:type/:id/search=:query', catalogHandler);
+app.get('/catalog/:type/:id/:extra.json', catalogHandler);
+app.get('/catalog/:type/:id/:extra', catalogHandler);
+app.get('/catalog/:type/:id.json', catalogHandler);
+app.get('/catalog/:type/:id', catalogHandler);
 
 // Endpoint GET /stream/anime/:id.json (y fallback sin extensión .json)
 const streamHandler = async (req, res) => {
@@ -370,8 +544,8 @@ const streamHandler = async (req, res) => {
   }
 };
 
-app.get('/stream/anime/:id.json', streamHandler);
-app.get('/stream/anime/:id', streamHandler);
+app.get('/stream/:type/:id.json', streamHandler);
+app.get('/stream/:type/:id', streamHandler);
 
 // Iniciar servidor local si no estamos en entorno Vercel Serverless
 if (!process.env.VERCEL) {
@@ -381,6 +555,7 @@ if (!process.env.VERCEL) {
     console.log(`🚀 TioHentai Addon iniciado correctamente`);
     console.log(`📡 Local: http://localhost:${PORT}`);
     console.log(`📄 Manifiesto: http://localhost:${PORT}/manifest.json`);
+    console.log(`📁 Catálogo: http://localhost:${PORT}/catalog/anime/tio-latest.json`);
     console.log(`=======================================================`);
   });
 }
