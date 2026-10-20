@@ -1,0 +1,31 @@
+{
+  "name": "nuvio-tiohentai-addon",
+  "version": "1.0.0",
+  "description": "Addon serverless para Nuvio y Stremio con web scraping en tiempo real de TioHentai",
+  "main": "api/index.js",
+  "scripts": {
+    "start": "node api/index.js",
+    "dev": "node api/index.js"
+  },
+  "keywords": [
+    "nuvio",
+    "stremio",
+    "addon",
+    "tiohentai",
+    "scraper",
+    "serverless",
+    "vercel"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@vercel/node": "^3.2.20",
+    "axios": "^1.7.9",
+    "cheerio": "^1.0.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
